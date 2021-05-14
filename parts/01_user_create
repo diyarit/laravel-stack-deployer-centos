@@ -1,0 +1,72 @@
+#!/bin/bash
+
+. ${BASH_SOURCE%/*}/00_settings
+
+logline "01.00 user create START"
+while [ -z "$username" ]; do
+	echo -n "Enter username to create and setup as sudoer =>" && read username
+done
+
+while [ -z "$pubkey" ]; do
+        echo "Paste your public key for ssh access"
+        read pubkey
+done 
+
+export username
+
+logline "01.01 add user"
+## add the user and lock the password
+adduser $username -m -n && passwd $username -l
+
+logline "01.02 setup ssh, bin and some settings"
+## set user's ssh
+su $username <<-'EOF'
+        mkdir ~/.ssh/
+        touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys
+        # add deploy key for the machine
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
+
+        chmod 0700 ~/.ssh
+
+	# lets make a ~/bin and add it to the path
+	mkdir ~/bin
+        echo "export PATH=\$PATH:~/bin" >> ~/.bashrc
+
+        # lets make a ~/crontab
+        mkdir ~/crontab
+
+        ## get rid of unreadable vim colorcoding
+        echo -e "syntax off\nset t_ti= t_te= \n" >> ~/.vimrc
+EOF
+echo -e "\n$pubkey\n" >>/home/$username/.ssh/authorized_keys
+
+logline "01.06 add $username to sudoers"
+## add user to sudoers
+chmod u+w /etc/sudoers
+echo "$username         ALL=(ALL) NOPASSWD:     ALL" >>/etc/sudoers
+chmod u-w /etc/sudoers
+
+logline "01.07 copy user scripts"
+cp -R ${BASH_SOURCE%/*}/userbin/* /home/$username/bin
+
+logline "01.08 install the indispensable 'z' tool"
+# do we have wget yet?
+yum -d1 -y install wget
+# install https://github.com/rupa/z
+wget https://raw.githubusercontent.com/rupa/z/master/z.sh
+mv ./z.sh /home/$username/bin
+printf "\n\n#initialize Z (https://github.com/rupa/z) \n. ~/bin/z.sh \n\n" >> .bashrc
+
+logline "01.09 ~/bin: change permissions and make executabe"
+chown -R $username:users /home/$username/bin
+chmod -R a+x /home/$username/bin
+
+logline "01.10 create user crontab"
+cp -R ${BASH_SOURCE%/*}/usercron/* /home/$username/crontab
+chown -R $username:users /home/$username/crontab
+chmod a+x /home/$username/crontab/every*
+# start the cron for user
+su $username -l -c "cd crontab;crontab crondef"
+
+logline "01.99 user create END"
+

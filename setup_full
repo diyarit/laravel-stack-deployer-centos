@@ -1,0 +1,29 @@
+#!/bin/bash
+echo "##########################################################"
+echo "laravel-stack-deployer-centos -- FULL SETUP -- By Diyar-IT"
+echo "##########################################################"
+
+. ./parts/01_user_create
+. ./parts/02_set_hostname
+. ./parts/03_repos_yums
+. ./parts/04_root_password
+. ./parts/05_security
+. ./parts/06_global_settings
+. ./parts/07_php
+. ./parts/08_node_npm
+. ./parts/09_mariadb_mysql
+. ./parts/10_nginx
+. ./parts/11_laravel
+. ./parts/12_redis
+
+echo "##########################################################"
+echo "FULL setup ready"
+echo "##########################################################"
+echo "Need to reboot for SELinux config change. Press a key to reboot"
+echo "Then login as $username, not as root! Press a key to reboot"
+read
+reboot now
+
+
+
+

@@ -1,0 +1,202 @@
+#!/bin/bash
+
+if [ -z "$2" ]; then
+	echo "Usage: addzhost <domain> <pull-repo> [<initial-tag>]"
+	echo "Add Zero Downtime Deployment virtual host using export from remote repository"
+ 	echo "1) creates /var/www/domain"
+ 	echo "2) creates vhost nginx to domain and *.domain (like www.asd.nl)"
+ 	echo "3) creates puller to pull from git repo <pull-repo>"
+	echo "4) checks out <initial-tag> as first release or MASTER as default"
+	echo "USE FULL DOMAIN like xxyy.nl or asd.com"
+	echo "USE remote repo ssh clone address - make sure this server id_rsa.pub has access to an account that can read the repo"
+	echo "Dont forget to edit the .env on the top directory!"
+	exit;
+fi
+# expand the ~ directory
+HOME=`readlink -f ~`
+
+if [ -z $3 ]; then
+	TAG=master
+else
+	TAG=$3
+fi
+
+export WWWDIR=/var/www
+export VHOSTDIR=/etc/nginx/sites-available
+
+WWWSITE=$WWWDIR/$1
+GITREPO=$2
+SERVERNAME=$1
+
+if [ -d $WWWSITE ]; then
+	echo "$WWWSITE already exists!"
+	exit
+fi
+
+echo "Laravel app    at: $WWWSITE"
+echo "Git repository at: $GITREPO"
+echo "Servername       : $SERVERNAME"
+echo "Initial release  : $TAG"
+echo -n "Press return to continue >" && read
+
+echo ">>>> Generating laravel directory structure for Zero-Downtime-Deploy"
+sudo mkdir $WWWSITE
+sudo mkdir -p $WWWSITE/releases/$TAG
+sudo mkdir -p $WWWSITE/storage
+sudo chown -R $USER:nginx $WWWSITE
+mkdir -p $WWWSITE/storage/logs
+mkdir -p $WWWSITE/storage/framework/cache
+mkdir -p $WWWSITE/storage/framework/views
+mkdir -p $WWWSITE/storage/framework/sessions
+chmod a+w -R $WWWSITE/storage
+echo "STUB" >$WWWSITE/storage/stub
+cat << EOFETC >$WWWSITE/.env
+APP_ENV=prod
+APP_KEY=base64:/kWEgZL5G/I7zQi72qocObBxeHNMDJfJEwIHy+tdeAk=
+EOFETC
+
+cd $WWWSITE
+# create puller script. Heredoc without quotes will interpolate $ and literal $ needs \$ and <<- heredoc will allow indentation
+cat << EOFPULLER >$WWWSITE/puller
+	if [ -z "\$1" ]; then
+		echo "Usage: puller <tag>"
+		exit
+	fi
+	# exit on any failure
+	set -e
+	export PROJECT_DIR=$WWWSITE
+	RELEASE_DIR=\$PROJECT_DIR/releases/\$1
+	STORAGE_DIR=\$PROJECT_DIR/storage
+	ENV_DIR=\$PROJECT_DIR/.env
+	CURRENT_DIR=\$PROJECT_DIR/current
+
+	mkdir -p \$RELEASE_DIR
+	cd \$RELEASE_DIR
+	echo ">>>> Pulling git archive from $GITREPO into \$RELEASE_DIR"
+	git archive --remote=$GITREPO --format=tar \$1 | tar xf -
+	echo ">>>> Pulled \$1 archive. Now do some after-deploy work"
+	sudo chown $USER:nginx -R \$RELEASE_DIR
+	# standard symlinks
+	ln -sf \$ENV_DIR ./
+	rm -Rf storage
+	ln -sf \$STORAGE_DIR ./
+	composer install -o --no-interaction --no-dev
+	if [ -f after_deploy ]; then
+		. ./after_deploy
+	fi
+	sudo chmod a+w -R \$STORAGE_DIR
+	# this one might not exist
+	sudo chmod -f a+w \$RELEASE_DIR/bootstrap/cache || true
+	# now swap for current
+	echo ">>>> \$1 ready to go live"
+	rm -f \$CURRENT_DIR
+	# even more atomic: ln -sf \$RELEASE_DIR current_tmp && mv -Tf current_tmp current
+	ln -sf \$RELEASE_DIR \$CURRENT_DIR
+	echo ">>>> \$1 is now live"
+	#maybe we need to restart some services like queue workers that need everything in 'current'
+	if [ -f after_deploy_is_live ]; then
+		. ./after_deploy_is_live
+	fi
+	exit 0
+EOFPULLER
+cat << EOFROLLBACK >$WWWSITE/rollback
+	if [ -z "\$1" ]; then
+                echo "Usage: rollback <tag> - rolls back to <tag> which should already exist"
+                exit
+        fi
+	set -e
+
+	export PROJECT_DIR=$WWWSITE
+	RELEASE_DIR=\$PROJECT_DIR/releases/\$1
+	STORAGE_DIR=\$PROJECT_DIR/storage
+	ENV_DIR=\$PROJECT_DIR/.env
+	CURRENT_DIR=\$PROJECT_DIR/current
+
+	if [ ! -d \$RELEASE_DIR ]; then
+		echo "Release $1 does not exist"
+		exit
+	fi
+	echo "\$1 ready to go live"
+        rm -f $WWWSITE/current
+        ln -sf \$RELEASE_DIR $WWWSITE/current
+        echo "\$1 is now live"
+EOFROLLBACK
+chmod a+x $WWWSITE/puller
+chmod a+x $WWWSITE/rollback
+echo "Created $WWWSITE ZDD structure. Now pulling initial release"
+if $WWWSITE/puller $TAG ; then
+	echo "Successful pull. Lets continue"
+else
+	echo "The pull was not succesfull. Do you want to rollback? (N/y)"
+	read rollback
+	if [ "$rollback" == "y" ]; then
+		echo "Removing $WWWSITE "
+		sudo rm -Rf $WWWSITE
+		echo "Rolled back"
+		exit 1
+	fi
+fi
+echo "------------------------- NGINX vhost ---------------------------"
+max=0
+for f in $VHOSTDIR/*.conf; do
+        #echo $f
+        v=`basename $f | grep -o "[0-9]*" | head -1`
+        #echo "$f -> $v"
+        if [ "$f" == "$VHOSTDIR/$v-$SERVERNAME.conf" ]; then
+            echo "vhost already exists: $f - press enter to continue and move old to $f.org"
+            read
+            sudo mv $f $f.org
+			sudo rm /etc/nginx/sites-enabled/$v-$SERVERNAME.conf
+        fi
+        if [ 0$v -gt 0$max ]; then
+                max=$v
+        fi
+done
+# convert max to 10based decimal (remove leading 0 which leads to octal numbers)
+let "max=$((10#$max))+1"
+printf -v maxf "%02d" $max
+newconffile=$maxf-$SERVERNAME.conf
+newconf=$VHOSTDIR/$maxf-$SERVERNAME.conf
+cat << EOF-nginxconf >/tmp/newconf
+server {
+        server_name www.$SERVERNAME;
+        return 301 \$scheme://$SERVERNAME\$request_uri;
+}
+server {
+   listen   80;
+   server_name $SERVERNAME *.$SERVERNAME;
+   root $WWWSITE/current/public;
+   index  index.html index.htm index.php;
+
+   location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+   }
+
+   location ~ \.php\$ {
+       fastcgi_pass 127.0.0.1:9000;
+       fastcgi_index  index.php;
+       try_files \$uri /index.php =404;
+       fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+	# note realpathroot instead of documentroot makes symbolic link resolved by nginx and solves php realpath issues
+       fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+       fastcgi_buffers 256 128k;
+       fastcgi_connect_timeout 300s;
+       fastcgi_send_timeout 300s;
+       fastcgi_read_timeout 300s;
+       include fastcgi_params;
+    }
+}
+EOF-nginxconf
+sudo cp /tmp/newconf $newconf
+sudo ln -s $newconf /etc/nginx/sites-enabled/$newconffile
+echo "Created $newconf for nginx. restarting nginx.."
+sudo service nginx restart
+
+echo "Adding Laravel schedule to crontab"
+cd ~/crontab
+echo "* * * * * php $WWWSITE/current/artisan schedule:run >> /dev/null 2>&1" >>crondef
+crontab crondef
+cd ~
+
+myip=`curl -s ifconfig.me`
+echo "-------------------------------------------------------------"

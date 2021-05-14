@@ -1,0 +1,26 @@
+#!/bin/bash
+
+. ${BASH_SOURCE%/*}/00_settings
+
+logline "03.00 install EPEL and REMI repos and yum standard packages"
+
+logline "03.01 add repos"
+yum -d1 -y install epel-release
+yum -d1 -y install wget
+dnf install -y https://rpms.remirepo.net/enterprise/remi-release-8.rpm
+yum -q repolist
+
+logline "03.02 update system - this can take a while.."
+yum -y update
+
+logline "03.03 yum some sysop and dev tools"
+yum -d1 -y install htop iotop ncdu pv unzip gcc autoconf automake gcc-c++ make git
+## optional BIG development install
+## yum groupinstall "Development Tools"
+
+logline "03.04 add gh command to git for push to github (origin)"
+git config --global alias.gh '!f() { git add -A && git commit -m "${@:-incremental}" && git push; }; f'
+
+
+logline "03.99 repos and yums END"
+
